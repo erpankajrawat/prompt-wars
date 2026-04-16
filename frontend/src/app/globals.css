@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  background-color: theme('colors.background');
+  color: theme('colors.foreground');
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/5 backdrop-blur-lg border border-white/10 rounded-2xl shadow-xl;
+  }
+  
+  .glow-button {
+    @apply relative overflow-hidden transition-all duration-300 hover:shadow-[0_0_20px_rgba(168,85,247,0.4)];
+  }
+}

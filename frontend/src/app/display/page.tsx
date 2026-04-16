@@ -1,0 +1,100 @@
+"use client";
+
+import { useEffect, useState } from 'react';
+import { ChefHat, Flame, Users } from 'lucide-react';
+
+export default function BigScreenDisplay() {
+  const [queue, setQueue] = useState<string[]>([]);
+  
+  useEffect(() => {
+    const fetchQueue = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/api/kitchen-queue");
+        const data = await res.json();
+        setQueue(data.queue);
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    
+    fetchQueue();
+    const interval = setInterval(fetchQueue, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <main className="min-h-screen bg-black text-white p-12 overflow-hidden flex flex-col">
+      <div className="flex justify-between items-center mb-16 border-b border-white/10 pb-8">
+         <h1 className="text-6xl font-black tracking-tighter bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400 uppercase">
+           Stadium Status
+         </h1>
+         <div className="flex space-x-6 text-2xl font-medium items-center">
+            <div className="flex items-center gap-3 bg-white/5 px-6 py-3 rounded-2xl">
+               <Users className="text-blue-400 w-8 h-8"/> 
+               <span>Restrooms: <span className="text-emerald-400 font-bold">2 min walk</span></span>
+            </div>
+         </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-12 flex-1">
+        <div className="glass-panel p-10 flex flex-col relative overflow-hidden bg-white/[0.02]">
+            <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 blur-[100px]" />
+            <h2 className="text-4xl font-bold mb-8 flex items-center gap-4 text-emerald-400">
+              <CheckCircle2Icon className="w-10 h-10" /> Now Serving
+            </h2>
+            <div className="flex flex-wrap gap-6">
+                {(queue.slice(0, 5)).map((id) => (
+                  <div key={id} className="text-5xl font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-8 py-6 rounded-2xl shadow-lg shadow-emerald-500/10 animate-bounce">
+                      {id.replace("ORDER-", "#")}
+                  </div>
+                ))}
+            </div>
+        </div>
+
+        <div className="glass-panel p-10 flex flex-col relative overflow-hidden bg-white/[0.02]">
+            <div className="absolute top-0 right-0 w-64 h-64 bg-orange-500/10 blur-[100px]" />
+            <h2 className="text-4xl font-bold mb-8 flex items-center gap-4 text-orange-400">
+               <Flame className="w-10 h-10" /> In Kitchen Prep
+            </h2>
+            <div className="flex flex-col gap-6">
+                {queue.slice(5, 10).map((id) => (
+                   <div key={id} className="text-3xl font-medium bg-white/5 px-6 py-4 rounded-xl border border-white/10 flex justify-between">
+                     <span>{id.replace("ORDER-", "Order #")}</span>
+                     <span className="text-orange-400 flex items-center gap-2">
+                       <ChefHat className="w-5 h-5"/> Cooking
+                     </span>
+                   </div>
+                ))}
+                {queue.length > 10 && (
+                   <div className="text-white/40 text-2xl mt-4">...and {queue.length - 10} more in queue optimized by Agents.</div>
+                )}
+                {queue.length === 0 && (
+                   <div className="text-white/40 text-2xl mt-4">Kitchen is clear.</div>
+                )}
+            </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// Icon component
+function CheckCircle2Icon(props) {
+  return (
+    <svg
+      {...props}
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  )
+}
