@@ -15,7 +15,7 @@ export default function BigScreenDisplay() {
   useEffect(() => {
     const fetchQueue = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/kitchen-queue");
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/kitchen-queue`);
         const data = await res.json();
         setInKitchen(data.in_kitchen || []);
         setReady(data.ready || []);

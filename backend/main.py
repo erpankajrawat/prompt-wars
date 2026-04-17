@@ -2,126 +2,45 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-import sqlite3
 import json
 import asyncio
 import time
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from google.cloud import firestore
 
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Database setup
+# Database setup (Firestore)
 # ---------------------------------------------------------------------------
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "orders.db")
-
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    """Create tables if they don't exist."""
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id          TEXT PRIMARY KEY,
-                phone             TEXT NOT NULL,
-                otp               TEXT NOT NULL,
-                status            TEXT NOT NULL DEFAULT 'pending_kitchen',
-                created_at        REAL NOT NULL,
-                kitchen_started_at REAL,
-                cook_time_secs    REAL NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS order_items (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id      TEXT NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
-                item_id       TEXT NOT NULL,
-                name          TEXT NOT NULL,
-                prep_time_secs INTEGER NOT NULL,
-                emoji         TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-
+# Firestore client will automatically use the project ID from environment
+# or from the Cloud Run service account.
+db = firestore.Client()
 
 def db_save_order(order: dict):
-    """Insert a brand-new order (and its items) into the database."""
-    with get_db() as conn:
-        conn.execute("""
-            INSERT OR REPLACE INTO orders
-                (order_id, phone, otp, status, created_at, kitchen_started_at, cook_time_secs)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            order["order_id"],
-            order["phone"],
-            order["otp"],
-            order["status"],
-            order["created_at"],
-            order["kitchen_started_at"],
-            order["cook_time_secs"],
-        ))
-        # Delete existing items first (for idempotency)
-        conn.execute("DELETE FROM order_items WHERE order_id = ?", (order["order_id"],))
-        for item in order["items"]:
-            conn.execute("""
-                INSERT INTO order_items (order_id, item_id, name, prep_time_secs, emoji)
-                VALUES (?, ?, ?, ?, ?)
-            """, (order["order_id"], item["id"], item["name"], item["prep_time_secs"], item["emoji"]))
-        conn.commit()
-
+    """Insert or update an order into Firestore."""
+    doc_ref = db.collection("orders").document(order["order_id"])
+    doc_ref.set(order)
 
 def db_update_order(order_id: str, status: str, kitchen_started_at: float | None = None):
     """Update the status (and optionally kitchen_started_at) of an existing order."""
-    with get_db() as conn:
-        if kitchen_started_at is not None:
-            conn.execute(
-                "UPDATE orders SET status=?, kitchen_started_at=? WHERE order_id=?",
-                (status, kitchen_started_at, order_id)
-            )
-        else:
-            conn.execute(
-                "UPDATE orders SET status=? WHERE order_id=?",
-                (status, order_id)
-            )
-        conn.commit()
-
+    doc_ref = db.collection("orders").document(order_id)
+    update_data = {"status": status}
+    if kitchen_started_at is not None:
+        update_data["kitchen_started_at"] = kitchen_started_at
+    doc_ref.update(update_data)
 
 def db_delete_order(order_id: str):
-    """Remove an order from the database (e.g. after kiosk pickup)."""
-    with get_db() as conn:
-        conn.execute("DELETE FROM orders WHERE order_id=?", (order_id,))
-        conn.commit()
-
+    """Remove an order from Firestore."""
+    db.collection("orders").document(order_id).delete()
 
 def db_load_orders() -> list[dict]:
-    """
-    Load all active orders from the database and reconstruct the
-    in-memory list structure (including nested items list).
-    """
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM orders ORDER BY created_at").fetchall()
-        orders = []
-        for row in rows:
-            items = conn.execute(
-                "SELECT item_id as id, name, prep_time_secs, emoji FROM order_items WHERE order_id=?",
-                (row["order_id"],)
-            ).fetchall()
-            orders.append({
-                "order_id":          row["order_id"],
-                "phone":             row["phone"],
-                "otp":               row["otp"],
-                "status":            row["status"],
-                "created_at":        row["created_at"],
-                "kitchen_started_at": row["kitchen_started_at"],
-                "cook_time_secs":    row["cook_time_secs"],
-                "items":             [dict(i) for i in items],
-            })
-    return orders
+    """Load all active orders from Firestore, ordered by creation time."""
+    orders_ref = db.collection("orders").order_by("created_at")
+    docs = orders_ref.stream()
+    return [doc.to_dict() for doc in docs]
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +50,7 @@ def db_load_orders() -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: initialise DB, reload orders, resume kitchen timers."""
-    init_db()
+    # init_db()  # No longer needed for Firestore
     recovered = db_load_orders()
     MOCK_ORDERS.extend(recovered)
 
@@ -158,13 +77,13 @@ async def lifespan(app: FastAPI):
             print(f"[Recovery] {order['order_id']} already READY — no timer needed")
 
     if recovered:
-        print(f"[DB] Recovered {len(recovered)} order(s) from orders.db")
+        print(f"[DB] Recovered {len(recovered)} order(s) from Firestore")
     else:
-        print("[DB] No previous orders found — fresh start")
+        print("[DB] No previous orders found in Firestore — fresh start")
 
     yield  # Application runs here
 
-    print("[DB] Shutting down — all state is persisted in orders.db")
+    print("[DB] Shutting down — state is managed in Firestore")
 
 
 # ---------------------------------------------------------------------------

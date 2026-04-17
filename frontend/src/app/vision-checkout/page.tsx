@@ -9,7 +9,7 @@ export default function VisionCheckout() {
   const simulateCheckout = async () => {
     setAnalyzing(true);
     try {
-      const res = await fetch("http://localhost:8000/api/vision-checkout", { method: 'POST' });
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/vision-checkout`, { method: 'POST' });
       const data = await res.json();
       await new Promise(r => setTimeout(r, 2000)); // Simulate Gemini Vision latency
       setResult(data);

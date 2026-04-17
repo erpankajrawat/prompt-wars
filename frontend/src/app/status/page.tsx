@@ -19,7 +19,7 @@ export default function StatusPage() {
     setResult(null);
 
     try {
-      const res = await fetch(`http://localhost:8000/api/status?identifier=${encodeURIComponent(identifier)}`);
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/status?identifier=${encodeURIComponent(identifier)}`);
       const data = await res.json();
       if (data.status === 'success') {
         setResult(data);

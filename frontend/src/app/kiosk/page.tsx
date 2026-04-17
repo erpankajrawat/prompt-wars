@@ -10,7 +10,7 @@ export default function KioskPage() {
     // In a real app we'd use a webcam to read the QR Code using react-qr-reader.
     // For this simulation, we simulate scanning the entered Order ID.
     try {
-      const res = await fetch(`http://localhost:8000/api/kiosk-pickup/${orderId}`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/kiosk-pickup/${orderId}`, {
          method: 'POST'
       });
       const data = await res.json();
