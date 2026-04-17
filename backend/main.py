@@ -24,7 +24,7 @@ def db_save_order(order: dict):
     doc_ref = db.collection("orders").document(order["order_id"])
     doc_ref.set(order)
 
-def db_update_order(order_id: str, status: str, kitchen_started_at: float | None = None):
+def db_update_order(order_id: str, status: str, kitchen_started_at: float = None):
     """Update the status (and optionally kitchen_started_at) of an existing order."""
     doc_ref = db.collection("orders").document(order_id)
     update_data = {"status": status}
