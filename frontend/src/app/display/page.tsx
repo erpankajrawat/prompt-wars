@@ -3,15 +3,22 @@
 import { useEffect, useState } from 'react';
 import { ChefHat, Flame, Users } from 'lucide-react';
 
+interface QueueEntry {
+  order_id: string;
+  wait_time_secs: number;
+}
+
 export default function BigScreenDisplay() {
-  const [queue, setQueue] = useState<string[]>([]);
+  const [inKitchen, setInKitchen] = useState<QueueEntry[]>([]);
+  const [ready, setReady] = useState<QueueEntry[]>([]);
   
   useEffect(() => {
     const fetchQueue = async () => {
       try {
         const res = await fetch("http://localhost:8000/api/kitchen-queue");
         const data = await res.json();
-        setQueue(data.queue);
+        setInKitchen(data.in_kitchen || []);
+        setReady(data.ready || []);
       } catch (err) {
         console.error(err);
       }
@@ -37,38 +44,43 @@ export default function BigScreenDisplay() {
       </div>
 
       <div className="grid grid-cols-2 gap-12 flex-1">
+        {/* NOW SERVING — orders that are ready_for_pickup */}
         <div className="glass-panel p-10 flex flex-col relative overflow-hidden bg-white/[0.02]">
             <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 blur-[100px]" />
             <h2 className="text-4xl font-bold mb-8 flex items-center gap-4 text-emerald-400">
               <CheckCircle2Icon className="w-10 h-10" /> Now Serving
             </h2>
             <div className="flex flex-wrap gap-6">
-                {(queue.slice(0, 5)).map((id) => (
-                  <div key={id} className="text-5xl font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-8 py-6 rounded-2xl shadow-lg shadow-emerald-500/10 animate-bounce">
-                      {id.replace("ORDER-", "#")}
+                {ready.length > 0 ? ready.map((entry) => (
+                  <div key={entry.order_id} className="text-5xl font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-8 py-6 rounded-2xl shadow-lg shadow-emerald-500/10 animate-bounce">
+                      {entry.order_id.replace("ORDER-", "#")}
                   </div>
-                ))}
+                )) : (
+                  <div className="text-white/40 text-2xl">No orders ready yet.</div>
+                )}
             </div>
         </div>
 
+        {/* IN KITCHEN PREP — orders that are in_kitchen */}
         <div className="glass-panel p-10 flex flex-col relative overflow-hidden bg-white/[0.02]">
             <div className="absolute top-0 right-0 w-64 h-64 bg-orange-500/10 blur-[100px]" />
             <h2 className="text-4xl font-bold mb-8 flex items-center gap-4 text-orange-400">
                <Flame className="w-10 h-10" /> In Kitchen Prep
             </h2>
             <div className="flex flex-col gap-6">
-                {queue.slice(5, 10).map((id) => (
-                   <div key={id} className="text-3xl font-medium bg-white/5 px-6 py-4 rounded-xl border border-white/10 flex justify-between">
-                     <span>{id.replace("ORDER-", "Order #")}</span>
-                     <span className="text-orange-400 flex items-center gap-2">
-                       <ChefHat className="w-5 h-5"/> Cooking
-                     </span>
+                {inKitchen.length > 0 ? inKitchen.map((entry) => (
+                   <div key={entry.order_id} className="text-3xl font-medium bg-white/5 px-6 py-4 rounded-xl border border-white/10 flex justify-between items-center tracking-tight">
+                     <span>{entry.order_id.replace("ORDER-", "Order #")}</span>
+                     <div className="flex items-center gap-6">
+                        <span className="text-white/60 text-xl font-light tracking-normal bg-black/50 px-4 py-2 rounded-lg border border-white/5 shadow-inner">
+                           <span className="text-orange-300 font-medium">{entry.wait_time_secs}</span> sec
+                        </span>
+                        <span className="text-orange-400 flex items-center gap-2">
+                          <ChefHat className="w-5 h-5"/> Prep
+                        </span>
+                     </div>
                    </div>
-                ))}
-                {queue.length > 10 && (
-                   <div className="text-white/40 text-2xl mt-4">...and {queue.length - 10} more in queue optimized by Agents.</div>
-                )}
-                {queue.length === 0 && (
+                )) : (
                    <div className="text-white/40 text-2xl mt-4">Kitchen is clear.</div>
                 )}
             </div>
@@ -79,7 +91,7 @@ export default function BigScreenDisplay() {
 }
 
 // Icon component
-function CheckCircle2Icon(props) {
+function CheckCircle2Icon(props: any) {
   return (
     <svg
       {...props}

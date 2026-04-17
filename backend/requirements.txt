@@ -1,6 +1,6 @@
-fastapi==0.103.1
-uvicorn==0.23.2
-pydantic==2.3.0
-google-genai==0.3.0 # or specific version for Google Agent Development Kit
-firebase-admin==6.2.0
-python-dotenv==1.0.0
+fastapi>=0.103.1
+uvicorn>=0.23.2
+pydantic>=2.13.0
+google-genai>=0.3.0 # or specific version for Google Agent Development Kit
+firebase-admin>=6.2.0
+python-dotenv>=1.0.0
