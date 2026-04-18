@@ -5,9 +5,13 @@ import os
 import json
 import asyncio
 import time
+import datetime
+import jwt
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from google.cloud import firestore
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 load_dotenv()
 
@@ -115,6 +119,26 @@ class OrderResponse(BaseModel):
 
 class ChefInput(BaseModel):
     name: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+# ---------------------------------------------------------------------------
+# JWT Security setup
+# ---------------------------------------------------------------------------
+SECRET_KEY = "prompt-wars-super-secret-key"
+ALGORITHM = "HS256"
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload["sub"]
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # ---------------------------------------------------------------------------
 # Menu catalog  (single source of truth for prep times)
@@ -291,21 +315,31 @@ def pickup_order(order_id: str):
     return {"status": "error", "message": "Order not found"}
 
 
+@app.post("/api/login")
+def login(creds: LoginRequest):
+    # Hardcoded credentials for the Kitchen Staff
+    if creds.username == "chef" and creds.password == "kitchen123":
+        expire = datetime.datetime.utcnow() + datetime.timedelta(hours=12)
+        token = jwt.encode({"sub": creds.username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+        return {"access_token": token}
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+
 @app.get("/api/kds")
-def get_kds_data():
+def get_kds_data(user: str = Depends(verify_token)):
     return {
         "chefs": MOCK_CHEFS,
         "tasks": [t for t in MOCK_TASKS if t["status"] != "DONE"]
     }
 
 @app.post("/api/chefs")
-def add_chef(payload: ChefInput):
+def add_chef(payload: ChefInput, user: str = Depends(verify_token)):
     new_chef = {"id": f"c{int(time.time()*1000)}", "name": payload.name, "isAvailable": True}
     MOCK_CHEFS.append(new_chef)
     return new_chef
 
 @app.delete("/api/chefs/{chef_id}")
-def remove_chef(chef_id: str):
+def remove_chef(chef_id: str, user: str = Depends(verify_token)):
     import random
     
     # 1. Remove the chef
@@ -328,7 +362,7 @@ def remove_chef(chef_id: str):
     return {"status": "success", "reassigned_tasks": reassigned_count}
 
 @app.post("/api/tasks/{task_id}/complete")
-def complete_task(task_id: str):
+def complete_task(task_id: str, user: str = Depends(verify_token)):
     for t in MOCK_TASKS:
         if t["id"] == task_id:
             t["status"] = "DONE"

@@ -25,11 +25,52 @@ export default function KitchenDisplayPage() {
   const [chefs, setChefs] = useState<Chef[]>([]);
   const [newChefName, setNewChefName] = useState('');
   const [tasks, setTasks] = useState<AssignedTask[]>([]);
+  
+  // Auth state
+  const [token, setToken] = useState<string | null>(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+
+  useEffect(() => {
+    const t = localStorage.getItem('kds_token');
+    if (t) setToken(t);
+  }, []);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('kds_token', data.access_token);
+        setToken(data.access_token);
+        setLoginError('');
+      } else {
+        setLoginError('Invalid identity');
+      }
+    } catch {
+      setLoginError('Login failed');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('kds_token');
+    setToken(null);
+  };
 
   // Periodically fetch live roster and task assignments from backend
   const fetchData = async () => {
+    if (!token) return;
     try {
-      const res = await fetch('/api/kds');
+      const res = await fetch('/api/kds', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.status === 401) return handleLogout();
       const data = await res.json();
       if (data.chefs) setChefs(data.chefs);
       if (data.tasks) setTasks(data.tasks);
@@ -39,17 +80,21 @@ export default function KitchenDisplayPage() {
   };
 
   useEffect(() => {
+    if (!token) return;
     fetchData();
     const interval = setInterval(fetchData, 2000); // Live poll every 2s
     return () => clearInterval(interval);
-  }, []);
+  }, [token]);
 
   // Handle adding/removing chefs
   const addChef = async () => {
-    if (!newChefName) return;
+    if (!newChefName || !token) return;
     await fetch('/api/chefs', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
       body: JSON.stringify({ name: newChefName })
     });
     setNewChefName('');
@@ -57,18 +102,52 @@ export default function KitchenDisplayPage() {
   };
 
   const removeChef = async (id: string) => {
-    // Optimistic UI update for snappiness
+    if (!token) return;
     setChefs(chefs.filter(c => c.id !== id));
-    await fetch(`/api/chefs/${id}`, { method: 'DELETE' });
+    await fetch(`/api/chefs/${id}`, { 
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
     fetchData();
   };
 
   // Complete a task
   const completeTask = async (taskId: string) => {
-    setTasks(tasks.filter(t => t.id !== taskId)); // Optimistic remove
-    await fetch(`/api/tasks/${taskId}/complete`, { method: 'POST' });
+    if (!token) return;
+    setTasks(tasks.filter(t => t.id !== taskId)); 
+    await fetch(`/api/tasks/${taskId}/complete`, { 
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
     fetchData();
   };
+
+  if (!token) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center bg-[#0a0a0a] text-white p-6 relative overflow-hidden">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-orange-600/10 blur-[150px] rounded-full pointer-events-none" />
+        <form onSubmit={handleLogin} className="z-10 bg-white/5 border border-white/10 p-10 rounded-3xl w-full max-w-sm backdrop-blur-xl shadow-2xl">
+          <div className="flex justify-center mb-6">
+            <div className="w-16 h-16 bg-gradient-to-br from-orange-400 to-red-600 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
+              <ChefHat className="text-white w-8 h-8" />
+            </div>
+          </div>
+          <h1 className="text-2xl font-bold mb-8 text-center bg-clip-text text-transparent bg-gradient-to-r from-orange-400 to-red-500">KDS Secure Login</h1>
+          
+          <input className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 mb-4 focus:outline-none focus:border-orange-500 transition-colors" type="text" placeholder="Username (chef)" value={username} onChange={e=>setUsername(e.target.value)} />
+          <input className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 mb-2 focus:outline-none focus:border-orange-500 transition-colors" type="password" placeholder="Password (kitchen123)" value={password} onChange={e=>setPassword(e.target.value)} />
+          <div className="h-6 mb-4">
+            {loginError && <p className="text-red-400 text-sm font-medium text-center animate-pulse">{loginError}</p>}
+          </div>
+           
+           <div className="flex flex-col gap-3">
+             <button className="w-full bg-gradient-to-r from-orange-500 to-red-600 hover:opacity-90 text-white font-semibold py-3 rounded-xl transition-all shadow-[0_0_20px_rgba(249,115,22,0.3)]" type="submit">Access Kitchen</button>
+             <Link href="/" className="w-full text-center py-2 text-white/40 hover:text-white transition-colors text-sm">Return to Main Menu</Link>
+           </div>
+        </form>
+      </main>
+    );
+  }
 
   return (
     <main className="flex min-h-screen flex-col p-6 md:p-10 relative overflow-hidden bg-[#0a0a0a] text-white">
@@ -79,9 +158,9 @@ export default function KitchenDisplayPage() {
       {/* Header */}
       <div className="flex justify-between items-center z-10 mb-8 border-b border-white/10 pb-6">
         <div>
-          <Link href="/" className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-2 text-sm">
-            <ArrowLeft className="w-4 h-4 mr-1" /> Exit KDS
-          </Link>
+          <button onClick={handleLogout} className="inline-flex items-center text-white/50 hover:text-white transition-colors mb-2 text-sm">
+            <ArrowLeft className="w-4 h-4 mr-1" /> Logout / Exit
+          </button>
           <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-orange-400 to-red-500 tracking-tight flex items-center gap-3">
             <Utensils className="w-8 h-8 text-orange-400" />
             Agentic Kitchen Display

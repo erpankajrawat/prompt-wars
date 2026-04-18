@@ -15,7 +15,7 @@ export default function Launchpad() {
         <p className="text-xl md:text-2xl text-white/50 font-light mt-4">Select an interface to begin</p>
       </div>
 
-      <div className="z-10 grid grid-cols-1 md:grid-cols-3 gap-8 w-full max-w-6xl">
+      <div className="z-10 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 w-full max-w-7xl">
         <Link href="/display" className="group">
           <div className="bg-white/5 hover:bg-white/10 border border-white/10 hover:border-blue-500/50 transition-all duration-300 rounded-3xl p-10 flex flex-col items-center text-center h-full hover:scale-105 will-change-transform shadow-2xl backdrop-blur-md">
             <div className="w-24 h-24 bg-blue-500/20 text-blue-400 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
@@ -41,6 +41,15 @@ export default function Launchpad() {
             </div>
             <h2 className="text-3xl font-bold mb-4 group-hover:text-purple-400 transition-colors">Check Status</h2>
             <p className="text-white/50 text-lg">Search interface to look up order status by phone or order ID.</p>
+          </div>
+        </Link>
+        <Link href="/kds" className="group">
+          <div className="bg-white/5 hover:bg-white/10 border border-white/10 hover:border-orange-500/50 transition-all duration-300 rounded-3xl p-10 flex flex-col items-center text-center h-full hover:scale-105 will-change-transform shadow-2xl backdrop-blur-md">
+            <div className="w-24 h-24 bg-orange-500/20 text-orange-400 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
+              <span className="text-5xl">👨‍🍳</span>
+            </div>
+            <h2 className="text-3xl font-bold mb-4 group-hover:text-orange-400 transition-colors">Kitchen Display</h2>
+            <p className="text-white/50 text-lg">Manage chef assignments and AI tasks. Protected by login.</p>
           </div>
         </Link>
       </div>
