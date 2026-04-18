@@ -72,12 +72,18 @@ export default function BigScreenDisplay() {
                    <div key={entry.order_id} className="text-3xl font-medium bg-white/5 px-6 py-4 rounded-xl border border-white/10 flex justify-between items-center tracking-tight">
                      <span>{entry.order_id.replace("ORDER-", "Order #")}</span>
                      <div className="flex items-center gap-6">
-                        <span className="text-white/60 text-xl font-light tracking-normal bg-black/50 px-4 py-2 rounded-lg border border-white/5 shadow-inner">
-                           <span className="text-orange-300 font-medium">{entry.wait_time_secs}</span> sec
-                        </span>
-                        <span className="text-orange-400 flex items-center gap-2">
-                          <ChefHat className="w-5 h-5"/> Prep
-                        </span>
+                         <span className={`text-xl font-light tracking-normal bg-black/50 px-4 py-2 rounded-lg border border-white/5 shadow-inner ${
+                            entry.wait_time_secs > 15 
+                               ? 'text-emerald-400' 
+                               : entry.wait_time_secs > 0 
+                                  ? 'text-orange-400' 
+                                  : 'text-red-500 animate-pulse'
+                         }`}>
+                            <span className="font-bold">{entry.wait_time_secs > 0 ? entry.wait_time_secs : `+${Math.abs(entry.wait_time_secs)}`}</span> sec
+                         </span>
+                         <span className={`${entry.wait_time_secs > 0 ? 'text-orange-400' : 'text-red-500'} flex items-center gap-2`}>
+                           <ChefHat className="w-5 h-5"/> {entry.wait_time_secs > 0 ? 'Prep' : 'DELAYED'}
+                         </span>
                      </div>
                    </div>
                 )) : (

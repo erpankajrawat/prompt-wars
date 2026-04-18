@@ -94,10 +94,16 @@ export default function StatusPage() {
                            <Loader2 className="w-8 h-8 animate-spin" /> IN KITCHEN
                         </div>
                         <div className="bg-black/50 w-full rounded-2xl py-6 border border-white/5 shadow-inner">
-                           <div className="text-5xl font-light text-purple-300">
-                             {result.wait_time_secs} <span className="text-lg opacity-50 font-normal">sec</span>
+                           <div className={`text-5xl font-light ${
+                              result.wait_time_secs > 15 
+                                ? 'text-purple-300' 
+                                : result.wait_time_secs > 0 
+                                  ? 'text-orange-400' 
+                                  : 'text-red-500 animate-pulse'
+                           }`}>
+                             {result.wait_time_secs > 0 ? result.wait_time_secs : `+${Math.abs(result.wait_time_secs)}`} <span className="text-lg opacity-50 font-normal">sec</span>
                            </div>
-                           <div className="text-xs uppercase font-bold text-white/40 mt-1">Est. Wait Time</div>
+                           <div className="text-xs uppercase font-bold text-white/40 mt-1">{result.wait_time_secs > 0 ? 'Est. Wait Time' : 'OVERTIME'}</div>
                         </div>
                      </div>
                   ) : (
@@ -107,8 +113,14 @@ export default function StatusPage() {
                         </div>
                         <p className="text-white/50 text-sm">Waiting for Kitchen Agent to pick up your order…</p>
                         <div className="bg-black/50 w-full rounded-2xl py-6 border border-white/5 shadow-inner mt-4">
-                           <div className="text-5xl font-light text-blue-300">
-                             {result.wait_time_secs} <span className="text-lg opacity-50 font-normal">sec</span>
+                           <div className={`text-5xl font-light ${
+                              result.wait_time_secs > 15 
+                                ? 'text-blue-300' 
+                                : result.wait_time_secs > 0 
+                                  ? 'text-orange-400' 
+                                  : 'text-red-500 animate-pulse'
+                           }`}>
+                             {result.wait_time_secs > 0 ? result.wait_time_secs : `+${Math.abs(result.wait_time_secs)}`} <span className="text-lg opacity-50 font-normal">sec</span>
                            </div>
                            <div className="text-xs uppercase font-bold text-white/40 mt-1">Est. Wait Time</div>
                         </div>

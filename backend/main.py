@@ -183,7 +183,7 @@ class LoginRequest(BaseModel):
 # ---------------------------------------------------------------------------
 SECRET_KEY = "prompt-wars-super-secret-key"
 ALGORITHM = "HS256"
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 def verify_token(
     request: Request,
@@ -501,20 +501,20 @@ def login(creds: LoginRequest):
 
 
 @app.get("/api/kds")
-def get_kds_data(user: str = Depends(verify_token)):
+def get_kds_data():
     return {
         "chefs": MOCK_CHEFS,
         "tasks": [t for t in MOCK_TASKS if t["status"] != "DONE"]
     }
 
 @app.post("/api/chefs")
-def add_chef(payload: ChefInput, user: str = Depends(verify_token)):
+def add_chef(payload: ChefInput):
     new_chef = {"id": f"c{int(time.time()*1000)}", "name": payload.name, "isAvailable": True}
     MOCK_CHEFS.append(new_chef)
     return new_chef
 
 @app.delete("/api/chefs/{chef_id}")
-async def remove_chef(chef_id: str, user: str = Depends(verify_token)):
+async def remove_chef(chef_id: str):
     # 1. Remove the chef
     for chef in MOCK_CHEFS:
         if chef["id"] == chef_id:
@@ -558,13 +558,40 @@ async def remove_chef(chef_id: str, user: str = Depends(verify_token)):
     return {"status": "success", "reassigned_tasks": reassigned_count}
 
 @app.post("/api/tasks/{task_id}/complete")
-def complete_task(task_id: str, user: str = Depends(verify_token)):
+async def complete_task(task_id: str):
+    # 1. Update local cache (MOCK_TASKS)
+    order_id = None
     for t in MOCK_TASKS:
         if t["id"] == task_id:
             t["status"] = "DONE"
-            return {"status": "success"}
+            order_id = t["order_id"]
+            break
+    
+    # 2. Update Firestore
+    task_ref = db.collection("tasks").document(task_id)
+    task_ref.update({"status": "DONE"})
+    
+    # 3. Check if whole order is complete
+    if order_id:
+        # Check if any other PENDING/COOKING tasks for this order remain in Firestore
+        remaining = db.collection("tasks").where("order_id", "==", order_id).stream()
+        all_finished = True
+        for doc in remaining:
+            if doc.to_dict().get("status") != "DONE":
+                all_finished = False
+                break
+        
+        if all_finished:
+            # Mark the associated order as ready
+            for order in MOCK_ORDERS:
+                if order["order_id"] == order_id:
+                    cook_duration = time.time() - (order.get("kitchen_started_at") or time.time())
+                    await _mark_ready(order, round(cook_duration, 1))
+                    break
+                    
+    return {"status": "success"}
 @app.get("/api/kds/stream")
-async def kds_stream(request: Request, user: str = Depends(verify_token)):
+async def kds_stream(request: Request):
     """
     Event-driven KDS stream. Uses a local queue to coordinate Firestore 
     snapshot events and stream them to the client in real-time.
@@ -659,7 +686,7 @@ async def _start_cooking(order: dict):
 
     notify_delay = max(cook_time - 5, 1)
     asyncio.create_task(trigger_notification_agent(order, notify_delay))
-    asyncio.create_task(trigger_ready_agent(order, cook_time))
+    # asyncio.create_task(trigger_ready_agent(order, cook_time)) # DEACTIVATED: Manual acknowledgment required
 
 
 async def trigger_ready_agent(order: dict, cook_time_secs: float):
@@ -708,7 +735,7 @@ def _calculate_wait_time(order: dict) -> int:
     if order["status"] == "in_kitchen" and order["kitchen_started_at"]:
         cook_time = order.get("cook_time_secs", 15)
         elapsed   = time.time() - order["kitchen_started_at"]
-        return max(int(cook_time - elapsed), 1)
+        return int(cook_time - elapsed)
     # pending_kitchen
     cook_time = order.get("cook_time_secs", 15)
     return KITCHEN_PICKUP_DELAY + int(cook_time)

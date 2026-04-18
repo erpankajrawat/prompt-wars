@@ -67,9 +67,7 @@ export default function KitchenDisplayPage() {
   const fetchData = async () => {
     if (!token) return;
     try {
-      const res = await fetch('/api/kds', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await fetch('/api/kds');
       if (res.status === 401) return handleLogout();
       const data = await res.json();
       if (data.chefs) setChefs(data.chefs);
@@ -83,7 +81,7 @@ export default function KitchenDisplayPage() {
     if (!token) return;
 
     // Use EventSource for real-time, event-driven updates (Firestore snapshots via SSE)
-    const streamUrl = `/api/kds/stream?token=${token}`;
+    const streamUrl = `/api/kds/stream`;
     const eventSource = new EventSource(streamUrl);
 
     eventSource.onmessage = (event) => {
@@ -115,10 +113,7 @@ export default function KitchenDisplayPage() {
     if (!newChefName || !token) return;
     await fetch('/api/chefs', {
       method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newChefName })
     });
     setNewChefName('');
@@ -129,8 +124,7 @@ export default function KitchenDisplayPage() {
     if (!token) return;
     setChefs(chefs.filter(c => c.id !== id));
     await fetch(`/api/chefs/${id}`, { 
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` }
+      method: 'DELETE'
     });
     fetchData();
   };
@@ -140,8 +134,7 @@ export default function KitchenDisplayPage() {
     if (!token) return;
     setTasks(tasks.filter(t => t.id !== taskId)); 
     await fetch(`/api/tasks/${taskId}/complete`, { 
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` }
+      method: 'POST'
     });
     fetchData();
   };
