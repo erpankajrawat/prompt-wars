@@ -26,3 +26,5 @@ backend/orders.db
 .DS_Store
 Thumbs.db
 reviewer.md
+firebase-adminsdk
+reviewer-fix.md
