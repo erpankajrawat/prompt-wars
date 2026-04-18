@@ -201,6 +201,7 @@ export default function KitchenDisplayPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 z-10 flex-1">
         {chefs.map(chef => {
           const chefTasks = tasks.filter(t => t.assigned_chef_id === chef.id && t.status !== 'DONE');
+          const totalTime = chefTasks.reduce((sum, t) => sum + t.prep_time_secs, 0);
           
           return (
             <div key={chef.id} className="flex flex-col bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden shadow-2xl relative group hover:border-orange-500/30 transition-all duration-500">
@@ -217,9 +218,15 @@ export default function KitchenDisplayPage() {
                     </p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-3xl font-light text-white/80">{chefTasks.length}</span>
-                  <p className="text-[10px] uppercase tracking-wider text-white/40">Tasks</p>
+                <div className="flex gap-4 text-right">
+                  <div>
+                    <span className="text-3xl font-light text-white/80">{chefTasks.length}</span>
+                    <p className="text-[10px] uppercase tracking-wider text-white/40">Tasks</p>
+                  </div>
+                  <div className="bg-orange-500/10 px-3 py-1 rounded-xl border border-orange-500/20">
+                    <span className="text-2xl font-bold text-orange-400">{totalTime}s</span>
+                    <p className="text-[10px] uppercase tracking-wider text-orange-400/60">Load</p>
+                  </div>
                 </div>
               </div>
 

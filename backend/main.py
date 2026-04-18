@@ -228,12 +228,19 @@ async def create_order(order: OrderRequest):
     MOCK_ORDERS.append(order_data)
     db_save_order(order_data)   # ← persist immediately
     
-    import random
     available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
 
-    # AI Agent creating & assigning tasks
+    def _get_chef_load(c_id: str) -> int:
+        return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == c_id and t["status"] != "DONE")
+
+    # AI Agent creating & intelligently assigning tasks
     for item in resolved_items:
-        chef_id = random.choice(available_chefs)["id"] if available_chefs else "c1"
+        if available_chefs:
+            best_chef = min(available_chefs, key=lambda c: _get_chef_load(c["id"]))
+            chef_id = best_chef["id"]
+        else:
+            chef_id = "c1"
+            
         instruction = f"AI Agent: Prepare {item['name']}. Takes ~{item['prep_time_secs']}s to cook."
         if item['prep_time_secs'] == cook_time_secs:
             instruction += " High priority bottleneck!"
@@ -340,22 +347,24 @@ def add_chef(payload: ChefInput, user: str = Depends(verify_token)):
 
 @app.delete("/api/chefs/{chef_id}")
 def remove_chef(chef_id: str, user: str = Depends(verify_token)):
-    import random
-    
     # 1. Remove the chef
     for chef in MOCK_CHEFS:
         if chef["id"] == chef_id:
             MOCK_CHEFS.remove(chef)
             break
             
-    # 2. Re-assign their incomplete tasks to another available chef
+    # Helper to find load of a chef
+    def _get_chef_load(c_id: str) -> int:
+        return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == c_id and t["status"] != "DONE")
+
+    # 2. Re-assign their incomplete tasks to the least loaded available chef
     available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
     reassigned_count = 0
     for task in MOCK_TASKS:
         if task["assigned_chef_id"] == chef_id and task["status"] != "DONE":
             if available_chefs:
-                new_chef = random.choice(available_chefs)
-                task["assigned_chef_id"] = new_chef["id"]
+                best_chef = min(available_chefs, key=lambda c: _get_chef_load(c["id"]))
+                task["assigned_chef_id"] = best_chef["id"]
                 task["agent_instruction"] += f" (Reassigned from logged out chef)"
                 reassigned_count += 1
                 
