@@ -81,7 +81,7 @@ gcloud run deploy $FRONTEND_SERVICE \
     --region $REGION \
     --allow-unauthenticated \
     --service-account $FRONTEND_SA_EMAIL \
-    --set-env-vars NEXT_PUBLIC_API_URL=$BACKEND_URL \
+    --set-env-vars API_URL=$BACKEND_URL \
     --quiet
 
 # 8. Get the Frontend URL

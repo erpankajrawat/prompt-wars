@@ -22,7 +22,7 @@ export default function OrderPage() {
 
   // Fetch live menu (with per-item prep times) from backend
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/menu`)
+    fetch(`/api/menu`)
       .then(r => r.json())
       .then(data => setMenu(data.items || []))
       .catch(() => {
@@ -53,7 +53,7 @@ export default function OrderPage() {
     if (cart.length === 0) return alert("Add items to cart");
     setOrderState('ORDERING');
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/order`, {
+      const res = await fetch(`/api/order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_phone: phoneNumber, items: cart.map(i => i.id) })
