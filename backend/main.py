@@ -10,14 +10,15 @@ import jwt
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from google.cloud import firestore
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sse_starlette.sse import EventSourceResponse
 import random
+import asyncio
 
 try:
     from google.adk.agents import Agent
 except ImportError:
-    # Fallback or warning if ADK is not found
     pass
 
 load_dotenv()
@@ -184,9 +185,27 @@ SECRET_KEY = "prompt-wars-super-secret-key"
 ALGORITHM = "HS256"
 security = HTTPBearer()
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def verify_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """
+    Verifies JWT. Supports both 'Authorization: Bearer <token>' and 
+    '?token=<token>' query parameter (required for EventSource).
+    """
+    token = None
+    if credentials:
+        token = credentials.credentials
+    
+    # Fallback for EventSource query param
+    if not token:
+        token = request.query_params.get("token")
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload["sub"]
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -224,6 +243,32 @@ MENU_CATALOG: dict[str, dict] = {
 }
 
 KITCHEN_PICKUP_DELAY = 5   # seconds (agent A2A handshake latency)
+
+# Global memory caches (synchronized with Firestore in lifespan)
+MOCK_ORDERS: list[dict] = []
+MOCK_CHEFS: list[dict] = []
+MOCK_TASKS: list[dict] = []
+
+db = firestore.Client()
+
+# ---------------------------------------------------------------------------
+# Firestore Persistence Helpers
+# ---------------------------------------------------------------------------
+def db_save_order(order_data: dict):
+    db.collection("orders").document(order_data["order_id"]).set(order_data)
+
+def db_load_orders():
+    orders = db.collection("orders").stream()
+    return [o.to_dict() for o in orders]
+
+def db_update_order(order_id: str, status: str, kitchen_started_at: float = None):
+    data = {"status": status}
+    if kitchen_started_at:
+        data["kitchen_started_at"] = kitchen_started_at
+    db.collection("orders").document(order_id).update(data)
+
+def db_delete_order(order_id: str):
+    db.collection("orders").document(order_id).delete()
 
 # ---------------------------------------------------------------------------
 # Firestore Agent State & Maintenance (Distributed Persistence)
@@ -518,7 +563,63 @@ def complete_task(task_id: str, user: str = Depends(verify_token)):
         if t["id"] == task_id:
             t["status"] = "DONE"
             return {"status": "success"}
-    return {"status": "error", "message": "Task not found"}
+@app.get("/api/kds/stream")
+async def kds_stream(request: Request, user: str = Depends(verify_token)):
+    """
+    Event-driven KDS stream. Uses a local queue to coordinate Firestore 
+    snapshot events and stream them to the client in real-time.
+    """
+    async def event_generator():
+        # Queue for cross-thread Firestore watcher communication
+        queue = asyncio.Queue()
+
+        def on_snapshot(col_snapshot, changes, read_time):
+            # Put a "dirty" signal into the queue
+            asyncio.run_coroutine_threadsafe(queue.put(True), asyncio.get_event_loop())
+
+        # Watch the collections that impact KDS
+        watch_chefs = db.collection("chefs").on_snapshot(on_snapshot)
+        watch_tasks = db.collection("tasks").where("status", "in", ["PENDING", "COOKING"]).on_snapshot(on_snapshot)
+
+        try:
+            # Initial send
+            yield {
+                "event": "update",
+                "data": json.dumps({
+                    "chefs": [c.to_dict() for c in db.collection("chefs").stream()],
+                    "tasks": [t.to_dict() for t in db.collection("tasks").where("status", "in", ["PENDING", "COOKING"]).stream()]
+                })
+            }
+
+            while True:
+                # Disconnect check
+                if await request.is_disconnected():
+                    break
+
+                # Wait for a change event with a timeout for heartbeat
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=15.0)
+                    
+                    # Fetch fresh data
+                    chefs_snap = db.collection("chefs").stream()
+                    tasks_snap = db.collection("tasks").where("status", "in", ["PENDING", "COOKING"]).stream()
+                    
+                    yield {
+                        "event": "update",
+                        "data": json.dumps({
+                            "chefs": [c.to_dict() for c in chefs_snap],
+                            "tasks": [t.to_dict() for t in tasks_snap]
+                        })
+                    }
+                except asyncio.TimeoutError:
+                    # Heartbeat to keep connection alive
+                    yield {"event": "heartbeat", "data": "alive"}
+
+        finally:
+            watch_chefs.unsubscribe()
+            watch_tasks.unsubscribe()
+
+    return EventSourceResponse(event_generator())
 
 
 

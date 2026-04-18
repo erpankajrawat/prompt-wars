@@ -81,9 +81,33 @@ export default function KitchenDisplayPage() {
 
   useEffect(() => {
     if (!token) return;
-    fetchData();
-    const interval = setInterval(fetchData, 2000); // Live poll every 2s
-    return () => clearInterval(interval);
+
+    // Use EventSource for real-time, event-driven updates (Firestore snapshots via SSE)
+    const streamUrl = `/api/kds/stream?token=${token}`;
+    const eventSource = new EventSource(streamUrl);
+
+    eventSource.onmessage = (event) => {
+      // Handle heartbeats if needed, but onmessage usually handles 'message' events
+    };
+
+    eventSource.addEventListener('update', (event: any) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.chefs) setChefs(data.chefs);
+        if (data.tasks) setTasks(data.tasks);
+      } catch (err) {
+        console.error("Failed to parse KDS stream data", err);
+      }
+    });
+
+    eventSource.onerror = (err) => {
+      console.error("KDS Stream Error:", err);
+      // Optional: implement reconnection logic if EventSource doesn't auto-retry enough
+    };
+
+    return () => {
+      eventSource.close();
+    };
   }, [token]);
 
   // Handle adding/removing chefs
