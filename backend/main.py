@@ -393,28 +393,47 @@ def add_chef(payload: ChefInput, user: str = Depends(verify_token)):
     return new_chef
 
 @app.delete("/api/chefs/{chef_id}")
-def remove_chef(chef_id: str, user: str = Depends(verify_token)):
+async def remove_chef(chef_id: str, user: str = Depends(verify_token)):
     # 1. Remove the chef
     for chef in MOCK_CHEFS:
         if chef["id"] == chef_id:
             MOCK_CHEFS.remove(chef)
             break
             
-    # Helper to find load of a chef
-    def _get_chef_load(c_id: str) -> int:
-        return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == c_id and t["status"] != "DONE")
-
-    # 2. Re-assign their incomplete tasks to the least loaded available chef
-    available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
-    reassigned_count = 0
+    # 2. Extract tasks that belonged to this chef that are not done
+    orphaned_tasks = []
+    global MOCK_TASKS
+    filtered_tasks = []
     for task in MOCK_TASKS:
         if task["assigned_chef_id"] == chef_id and task["status"] != "DONE":
-            if available_chefs:
-                best_chef = min(available_chefs, key=lambda c: _get_chef_load(c["id"]))
-                task["assigned_chef_id"] = best_chef["id"]
-                task["agent_instruction"] += f" (Reassigned from logged out chef)"
-                reassigned_count += 1
-                
+            orphaned_tasks.append(task)
+        else:
+            filtered_tasks.append(task)
+    
+    MOCK_TASKS[:] = filtered_tasks  # clear them out for re-assignment
+    
+    reassigned_count = len(orphaned_tasks)
+    
+    if reassigned_count > 0 and kitchen_manager_agent:
+        # Prompt the GADK LLM Agent to act as the re-assignment router!
+        prompt = f"Chef {chef_id} just logged out. The following items lost their chef and need IMMEDIATE reassignment to active chefs:\n"
+        for tk in orphaned_tasks:
+            prompt += f"- {tk['item_name']} (from order {tk['order_id']}, prep time {tk['prep_time_secs']}s)\n"
+            
+        print("[Agent Orchestration] Dispatching Chef Walk-out Recovery to KitchenManagerAgent...")
+        try:
+            await kitchen_manager_agent.run_async(prompt)
+        except Exception as e:
+            print(f"[Agent Error] Reassignment failed: {e}. Falling back to default assignment.")
+            fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+            for tk in orphaned_tasks:
+                assign_task_to_chef(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "API Error Fallback")
+    else:
+        # Fallback if Agent wasn't initialized
+        fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+        for tk in orphaned_tasks:
+            assign_task_to_chef(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "Manual fallback")
+
     return {"status": "success", "reassigned_tasks": reassigned_count}
 
 @app.post("/api/tasks/{task_id}/complete")
