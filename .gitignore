@@ -25,3 +25,4 @@ backend/orders.db
 # OS files
 .DS_Store
 Thumbs.db
+reviewer.md

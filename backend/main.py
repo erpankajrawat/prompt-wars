@@ -60,8 +60,54 @@ def db_load_orders() -> list[dict]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: initialise DB, reload orders, resume kitchen timers."""
-    # init_db()  # No longer needed for Firestore
+    """Startup: initialize Agents with external prompts and sync roster."""
+    global orchestrator_agent
+    
+    # 0. Sync Firestore Roster & Prompt Config
+    _sync_initial_roster()
+    _sync_system_config() # Ensure maintenance_mode document exists
+    
+    try:
+        with open("prompts.json", "r") as f:
+            p_config = json.load(f)
+    except Exception:
+        p_config = {
+            "orchestrator_instruction": "Lead kitchen coordinator.",
+            "roster_instruction": "Roster monitor.",
+            "ops_instruction": "Task executor."
+        }
+    
+    # 1. Initialize the GADK Agent Swarm inside lifespan
+    try:
+        from google.adk.agents import Agent
+        
+        roster_agent = Agent(
+            model="gemini-1.5-flash",
+            name="RosterAgent",
+            instruction=p_config["roster_instruction"],
+            tools=[get_available_chefs_v2]
+        )
+
+        kitchen_ops_agent = Agent(
+            model="gemini-1.5-flash",
+            name="KitchenOpsAgent",
+            instruction=p_config["ops_instruction"],
+            tools=[assign_task_staged]
+        )
+
+        orchestrator_agent = Agent(
+            model="gemini-1.5-flash",
+            name="OrchestratorAgent",
+            instruction=p_config["orchestrator_instruction"],
+            tools=[is_system_active, commit_staged_tasks],
+            sub_agents=[roster_agent, kitchen_ops_agent]
+        )
+        print("[Agents] Atomic Distributed Swarm Online (External Prompts Loaded).")
+    except Exception as e:
+        print(f"[Agents Warning] GADK initialization failed: {e}")
+        orchestrator_agent = None
+
+    # recovery logic
     recovered = db_load_orders()
     MOCK_ORDERS.extend(recovered)
 
@@ -148,6 +194,21 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ---------------------------------------------------------------------------
+# Structured Models for Agent Protocol
+# ---------------------------------------------------------------------------
+from pydantic import Field
+
+class ChefAvailability(BaseModel):
+    id: str
+    name: str
+    current_load_secs: int
+
+class AssignmentResult(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+# ---------------------------------------------------------------------------
 # Menu catalog  (single source of truth for prep times)
 # ---------------------------------------------------------------------------
 
@@ -164,58 +225,77 @@ MENU_CATALOG: dict[str, dict] = {
 
 KITCHEN_PICKUP_DELAY = 5   # seconds (agent A2A handshake latency)
 
-# In-memory working set — loaded from DB on startup
-MOCK_ORDERS: list[dict] = []
+# ---------------------------------------------------------------------------
+# Firestore Agent State & Maintenance (Distributed Persistence)
+# ---------------------------------------------------------------------------
+def _sync_initial_roster():
+    """Ensure baseline chefs exist in Firestore on startup."""
+    initial_chefs = [
+        {"id": "c1", "name": "Chef Gordon", "isAvailable": True},
+        {"id": "c2", "name": "Chef Jamie", "isAvailable": True},
+    ]
+    for c in initial_chefs:
+        db.collection("chefs").document(c["id"]).set(c, merge=True)
 
-MOCK_CHEFS: list[dict] = [
-    {"id": "c1", "name": "Chef Gordon", "isAvailable": True},
-    {"id": "c2", "name": "Chef Jamie", "isAvailable": True},
-]
-MOCK_TASKS: list[dict] = []
+def _sync_system_config():
+    """Ensure maintenance_mode exists."""
+    cfg_ref = db.collection("config").document("kitchen")
+    if not cfg_ref.get().exists:
+        cfg_ref.set({"maintenance_mode": False})
 
 # ---------------------------------------------------------------------------
-# GADK Tools & Agents
+# GADK Tools (Staging & Human-in-the-loop Version)
 # ---------------------------------------------------------------------------
-def get_available_chefs() -> list[dict]:
-    """Returns a list of currently available chefs with their ID and Name."""
-    return [{"id": c["id"], "name": c["name"]} for c in MOCK_CHEFS if c["isAvailable"]]
+orchestrator_agent = None 
 
-def check_chef_load(chef_id: str) -> int:
-    """Returns the total prep time in seconds currently assigned to the given chef_id. Use this to determine how busy a chef is."""
-    return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == chef_id and t["status"] != "DONE")
+def is_system_active() -> bool:
+    """Returns True if the kitchen is currently accepting orders. If False, the agent must inform the user the kitchen is in maintenance."""
+    cfg = db.collection("config").document("kitchen").get().to_dict()
+    return not cfg.get("maintenance_mode", False)
 
-def assign_task_to_chef(order_id: str, item_name: str, prep_time_secs: int, chef_id: str, instruction: str) -> str:
-    """Assigns a cooking task for an order item to a specific chef with agent instructions."""
-    task_data = {
-        "id": f"t{int(time.time()*1000)}_{random.randint(100,999)}",
+def get_available_chefs_v2() -> list[ChefAvailability]:
+    """Retrieves all available chefs and calculates their live workloads from Firestore."""
+    chefs_ref = db.collection("chefs").where("isAvailable", "==", True).stream()
+    results = []
+    for doc in chefs_ref:
+        c = doc.to_dict()
+        tasks = db.collection("tasks").where("assigned_chef_id", "==", c["id"]).where("status", "in", ["PENDING", "COOKING"]).stream()
+        load = sum(t.to_dict().get("prep_time_secs", 0) for t in tasks)
+        results.append(ChefAvailability(id=c["id"], name=c["name"], current_load_secs=load))
+    return results
+
+def assign_task_staged(order_id: str, item_name: str, prep_time_secs: int, chef_id: str, instruction: str) -> AssignmentResult:
+    """Saves a 'Draft' assignment to the staging area to prevent partial commit failures."""
+    chef = db.collection("chefs").document(chef_id).get()
+    if not chef.exists:
+        raise ValueError(f"Chef ID {chef_id} does not exist!")
+
+    task_id = f"t{int(time.time()*1000)}_{random.randint(100,999)}"
+    staged_data = {
+        "id": task_id,
         "order_id": order_id,
         "item_name": item_name,
         "assigned_chef_id": chef_id,
         "agent_instruction": instruction,
         "prep_time_secs": prep_time_secs,
-        "status": "PENDING"
+        "status": "STAGED", 
+        "created_at": time.time()
     }
-    MOCK_TASKS.append(task_data)
-    return f"Assigned {item_name} to Chef {chef_id} successfully."
+    db.collection("staged_tasks").document(task_id).set(staged_data)
+    
+    return AssignmentResult(task_id=task_id, status="staged", message=f"Task {task_id} staged for atomic commit.")
 
-try:
-    kitchen_manager_agent = Agent(
-        model="gemini-2.5-flash",
-        name="KitchenManagerAgent",
-        description="Intelligent Kitchen routing agent that assigns incoming order items to chefs based on workload.",
-        instruction=(
-            "You are the Kitchen Manager Agent. A new order arrived with items and prep times. "
-            "You must assign EVERY item to an available chef.\n"
-            "1. First, check available chefs using get_available_chefs(). If none, assign everything to 'c1'.\n"
-            "2. For load-balancing, use check_chef_load(chef_id) to see who is the least loaded.\n"
-            "3. Assign EACH item using assign_task_to_chef(order_id, item_name, prep_time_secs, chef_id, instruction).\n"
-            "   The instruction should be a practical, 1-2 sentence kitchen instruction (e.g. 'Grill sausage on high').\n"
-            "DO NOT stop until every single item in the prompt has been assigned."
-        ),
-        tools=[get_available_chefs, check_chef_load, assign_task_to_chef]
-    )
-except NameError:
-    kitchen_manager_agent = None
+def commit_staged_tasks(order_id: str) -> str:
+    """Moves all STAGED tasks for an order into the live tasks collection. Only call this after all order items are staged."""
+    staged_ref = db.collection("staged_tasks").where("order_id", "==", order_id).stream()
+    count = 0
+    for doc in staged_ref:
+        task_data = doc.to_dict()
+        task_data["status"] = "PENDING"
+        db.collection("tasks").document(task_data["id"]).set(task_data)
+        db.collection("staged_tasks").document(task_data["id"]).delete()
+        count += 1
+    return f"Successfully committed {count} tasks to the live queue for Order {order_id}."
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -286,22 +366,18 @@ async def create_order(order: OrderRequest):
     for item in resolved_items:
         prompt += f"- {item['name']} (prep time: {item['prep_time_secs']}s)\n"
 
-    if kitchen_manager_agent:
-        print(f"[Agent Orchestration] Dispatching task to KitchenManagerAgent for {order_id}...")
+    if orchestrator_agent:
+        print(f"[Atomic Swarm] Handing off Order {order_id}...")
         try:
-            # The agent dynamically reasons, calls tools, and writes to MOCK_TASKS natively
-            await kitchen_manager_agent.run_async(prompt)
+            await orchestrator_agent.run_async(prompt)
         except Exception as e:
-            print(f"[Agent Error] Agent assignment failed: {e}. Falling back to default assignment.")
-            # Fallback in case API key is missing or quota runs out
-            fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
-            for item in resolved_items:
-                assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "API Error Fallback")
+            print(f"[Swarm Error] Distributed workflow failed: {e}. Order {order_id} remains uncommitted.")
+            # Fallback (Manual cleanup of staged tasks could happen here)
     else:
-        # Fallback if Agent wasn't initialized
+        # Fallback if Swarm not ready
         fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
         for item in resolved_items:
-            assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "Manual fallback")
+            assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "Manual Routing")
 
     item_summary = ", ".join(f"{i['emoji']} {i['name']} ({i['prep_time_secs']}s)" for i in resolved_items)
     print(f"[Ordering Agent] {order_id} — {item_summary} | Cook time: {cook_time_secs}s")

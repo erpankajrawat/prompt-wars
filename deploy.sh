@@ -67,6 +67,7 @@ gcloud run deploy $BACKEND_SERVICE \
     --region $REGION \
     --allow-unauthenticated \
     --service-account $BACKEND_SA_EMAIL \
+    --set-env-vars PROJECT_ID=$PROJECT_ID \
     --quiet
 
 # 6. Get the Backend URL
