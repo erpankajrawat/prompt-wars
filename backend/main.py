@@ -113,6 +113,9 @@ class OrderResponse(BaseModel):
     otp: str
     wait_time_secs: int
 
+class ChefInput(BaseModel):
+    name: str
+
 # ---------------------------------------------------------------------------
 # Menu catalog  (single source of truth for prep times)
 # ---------------------------------------------------------------------------
@@ -132,6 +135,12 @@ KITCHEN_PICKUP_DELAY = 5   # seconds (agent A2A handshake latency)
 
 # In-memory working set — loaded from DB on startup
 MOCK_ORDERS: list[dict] = []
+
+MOCK_CHEFS: list[dict] = [
+    {"id": "c1", "name": "Chef Gordon", "isAvailable": True},
+    {"id": "c2", "name": "Chef Jamie", "isAvailable": True},
+]
+MOCK_TASKS: list[dict] = []
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -194,6 +203,27 @@ async def create_order(order: OrderRequest):
 
     MOCK_ORDERS.append(order_data)
     db_save_order(order_data)   # ← persist immediately
+    
+    import random
+    available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
+
+    # AI Agent creating & assigning tasks
+    for item in resolved_items:
+        chef_id = random.choice(available_chefs)["id"] if available_chefs else "c1"
+        instruction = f"AI Agent: Prepare {item['name']}. Takes ~{item['prep_time_secs']}s to cook."
+        if item['prep_time_secs'] == cook_time_secs:
+            instruction += " High priority bottleneck!"
+
+        task_data = {
+            "id": f"t{int(time.time()*1000)}_{random.randint(100,999)}",
+            "order_id": order_id,
+            "item_name": item["name"],
+            "assigned_chef_id": chef_id,
+            "agent_instruction": instruction,
+            "prep_time_secs": item["prep_time_secs"],
+            "status": "PENDING"
+        }
+        MOCK_TASKS.append(task_data)
 
     item_summary = ", ".join(f"{i['emoji']} {i['name']} ({i['prep_time_secs']}s)" for i in resolved_items)
     print(f"[Ordering Agent] {order_id} — {item_summary} | Cook time: {cook_time_secs}s")
@@ -259,6 +289,53 @@ def pickup_order(order_id: str):
             else:
                 return {"status": "error", "message": f"{order_id} not ready yet (status: {order['status']})"}
     return {"status": "error", "message": "Order not found"}
+
+
+@app.get("/api/kds")
+def get_kds_data():
+    return {
+        "chefs": MOCK_CHEFS,
+        "tasks": [t for t in MOCK_TASKS if t["status"] != "DONE"]
+    }
+
+@app.post("/api/chefs")
+def add_chef(payload: ChefInput):
+    new_chef = {"id": f"c{int(time.time()*1000)}", "name": payload.name, "isAvailable": True}
+    MOCK_CHEFS.append(new_chef)
+    return new_chef
+
+@app.delete("/api/chefs/{chef_id}")
+def remove_chef(chef_id: str):
+    import random
+    
+    # 1. Remove the chef
+    for chef in MOCK_CHEFS:
+        if chef["id"] == chef_id:
+            MOCK_CHEFS.remove(chef)
+            break
+            
+    # 2. Re-assign their incomplete tasks to another available chef
+    available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
+    reassigned_count = 0
+    for task in MOCK_TASKS:
+        if task["assigned_chef_id"] == chef_id and task["status"] != "DONE":
+            if available_chefs:
+                new_chef = random.choice(available_chefs)
+                task["assigned_chef_id"] = new_chef["id"]
+                task["agent_instruction"] += f" (Reassigned from logged out chef)"
+                reassigned_count += 1
+                
+    return {"status": "success", "reassigned_tasks": reassigned_count}
+
+@app.post("/api/tasks/{task_id}/complete")
+def complete_task(task_id: str):
+    for t in MOCK_TASKS:
+        if t["id"] == task_id:
+            t["status"] = "DONE"
+            return {"status": "success"}
+    return {"status": "error", "message": "Task not found"}
+
+
 
 
 # ---------------------------------------------------------------------------
