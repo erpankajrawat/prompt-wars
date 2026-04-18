@@ -12,6 +12,13 @@ from dotenv import load_dotenv
 from google.cloud import firestore
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import random
+
+try:
+    from google.adk.agents import Agent
+except ImportError:
+    # Fallback or warning if ADK is not found
+    pass
 
 load_dotenv()
 
@@ -167,6 +174,50 @@ MOCK_CHEFS: list[dict] = [
 MOCK_TASKS: list[dict] = []
 
 # ---------------------------------------------------------------------------
+# GADK Tools & Agents
+# ---------------------------------------------------------------------------
+def get_available_chefs() -> list[dict]:
+    """Returns a list of currently available chefs with their ID and Name."""
+    return [{"id": c["id"], "name": c["name"]} for c in MOCK_CHEFS if c["isAvailable"]]
+
+def check_chef_load(chef_id: str) -> int:
+    """Returns the total prep time in seconds currently assigned to the given chef_id. Use this to determine how busy a chef is."""
+    return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == chef_id and t["status"] != "DONE")
+
+def assign_task_to_chef(order_id: str, item_name: str, prep_time_secs: int, chef_id: str, instruction: str) -> str:
+    """Assigns a cooking task for an order item to a specific chef with agent instructions."""
+    task_data = {
+        "id": f"t{int(time.time()*1000)}_{random.randint(100,999)}",
+        "order_id": order_id,
+        "item_name": item_name,
+        "assigned_chef_id": chef_id,
+        "agent_instruction": instruction,
+        "prep_time_secs": prep_time_secs,
+        "status": "PENDING"
+    }
+    MOCK_TASKS.append(task_data)
+    return f"Assigned {item_name} to Chef {chef_id} successfully."
+
+try:
+    kitchen_manager_agent = Agent(
+        model="gemini-2.5-flash",
+        name="KitchenManagerAgent",
+        description="Intelligent Kitchen routing agent that assigns incoming order items to chefs based on workload.",
+        instruction=(
+            "You are the Kitchen Manager Agent. A new order arrived with items and prep times. "
+            "You must assign EVERY item to an available chef.\n"
+            "1. First, check available chefs using get_available_chefs(). If none, assign everything to 'c1'.\n"
+            "2. For load-balancing, use check_chef_load(chef_id) to see who is the least loaded.\n"
+            "3. Assign EACH item using assign_task_to_chef(order_id, item_name, prep_time_secs, chef_id, instruction).\n"
+            "   The instruction should be a practical, 1-2 sentence kitchen instruction (e.g. 'Grill sausage on high').\n"
+            "DO NOT stop until every single item in the prompt has been assigned."
+        ),
+        tools=[get_available_chefs, check_chef_load, assign_task_to_chef]
+    )
+except NameError:
+    kitchen_manager_agent = None
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -228,33 +279,29 @@ async def create_order(order: OrderRequest):
     MOCK_ORDERS.append(order_data)
     db_save_order(order_data)   # ← persist immediately
     
-    available_chefs = [c for c in MOCK_CHEFS if c["isAvailable"]]
-
-    def _get_chef_load(c_id: str) -> int:
-        return sum(t["prep_time_secs"] for t in MOCK_TASKS if t["assigned_chef_id"] == c_id and t["status"] != "DONE")
-
-    # AI Agent creating & intelligently assigning tasks
+    # -------------------------------------------------------------------------
+    # REAL GADK ARCHITECTURE FOR AGENT ASSIGNMENT
+    # -------------------------------------------------------------------------
+    prompt = f"New Order ID: {order_id}\nItems to assign:\n"
     for item in resolved_items:
-        if available_chefs:
-            best_chef = min(available_chefs, key=lambda c: _get_chef_load(c["id"]))
-            chef_id = best_chef["id"]
-        else:
-            chef_id = "c1"
-            
-        instruction = f"AI Agent: Prepare {item['name']}. Takes ~{item['prep_time_secs']}s to cook."
-        if item['prep_time_secs'] == cook_time_secs:
-            instruction += " High priority bottleneck!"
+        prompt += f"- {item['name']} (prep time: {item['prep_time_secs']}s)\n"
 
-        task_data = {
-            "id": f"t{int(time.time()*1000)}_{random.randint(100,999)}",
-            "order_id": order_id,
-            "item_name": item["name"],
-            "assigned_chef_id": chef_id,
-            "agent_instruction": instruction,
-            "prep_time_secs": item["prep_time_secs"],
-            "status": "PENDING"
-        }
-        MOCK_TASKS.append(task_data)
+    if kitchen_manager_agent:
+        print(f"[Agent Orchestration] Dispatching task to KitchenManagerAgent for {order_id}...")
+        try:
+            # The agent dynamically reasons, calls tools, and writes to MOCK_TASKS natively
+            await kitchen_manager_agent.run_async(prompt)
+        except Exception as e:
+            print(f"[Agent Error] Agent assignment failed: {e}. Falling back to default assignment.")
+            # Fallback in case API key is missing or quota runs out
+            fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+            for item in resolved_items:
+                assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "API Error Fallback")
+    else:
+        # Fallback if Agent wasn't initialized
+        fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+        for item in resolved_items:
+            assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "Manual fallback")
 
     item_summary = ", ".join(f"{i['emoji']} {i['name']} ({i['prep_time_secs']}s)" for i in resolved_items)
     print(f"[Ordering Agent] {order_id} — {item_summary} | Cook time: {cook_time_secs}s")
