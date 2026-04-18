@@ -17,7 +17,8 @@ import random
 import asyncio
 
 try:
-    from google.adk.agents import Agent
+    from google import genai
+    from google.genai import types
 except ImportError:
     pass
 
@@ -78,42 +79,77 @@ async def lifespan(app: FastAPI):
             "ops_instruction": "Task executor."
         }
     
-    # 1. Initialize the GADK Agent Swarm inside lifespan
+    # 1. Initialize the Official Google GenAI Client
+    global orchestrator_agent
     try:
-        from google.adk.agents import Agent
+        from google import genai
+        # Initialize client (uses GOOGLE_API_KEY from environment)
+        genai_client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
         
-        roster_agent = Agent(
-            model="gemini-1.5-flash",
-            name="RosterAgent",
-            instruction=p_config["roster_instruction"],
-            tools=[get_available_chefs_v2]
-        )
+        class NativeOrchestrator:
+            def __init__(self, client, context_prompt):
+                self.client = client
+                self.instruction = context_prompt
+                self.tools = [
+                    is_system_active, 
+                    get_available_chefs_v2, 
+                    get_active_tasks,
+                    reassign_task,
+                    assign_task_staged, 
+                    commit_staged_tasks
+                ]
 
-        kitchen_ops_agent = Agent(
-            model="gemini-1.5-flash",
-            name="KitchenOpsAgent",
-            instruction=p_config["ops_instruction"],
-            tools=[assign_task_staged]
-        )
+            async def run_async(self, user_prompt: str):
+                # Native Gemini Tool Calling handles the multi-turn loop automatically
+                chat = self.client.chats.create(
+                    model="gemini-2.5-flash",
+                    config=types.GenerateContentConfig(
+                        system_instruction=self.instruction,
+                        tools=self.tools,
+                    )
+                )
+                # We consume it once to trigger the tool loop
+                response = chat.send_message(user_prompt)
+                
+                # Check for tool usage in logs
+                tool_calls = []
+                for part in response.candidates[0].content.parts:
+                    if part.function_call:
+                        tool_calls.append(part.function_call.name)
+                
+                log_text = f"Tools: {', '.join(tool_calls)}" if tool_calls else (response.text[:100] if response.text else "No action needed")
+                print(f"[Native Swarm] Final Output: {log_text}")
+                yield True
 
-        orchestrator_agent = Agent(
-            model="gemini-1.5-flash",
-            name="OrchestratorAgent",
-            instruction=p_config["orchestrator_instruction"],
-            tools=[is_system_active, commit_staged_tasks],
-            sub_agents=[roster_agent, kitchen_ops_agent]
+        master_instruction = (
+            f"{p_config['orchestrator_instruction']}\n\n"
+            "DYNAMIC BALANCING: You also monitor team changes. If a chef leaves, re-assign their tasks. "
+            "If a new chef joins, use your tools to distribute some PENDING tasks to them to balance the load.\n\n"
+            f"RESOURCES:\n{p_config['roster_instruction']}\n{p_config['ops_instruction']}"
         )
-        print("[Agents] Atomic Distributed Swarm Online (External Prompts Loaded).")
+        orchestrator_agent = NativeOrchestrator(genai_client, master_instruction)
+        print("[Agents] Official Google GenAI Swarm Online (Stable Native Protocol).")
     except Exception as e:
-        print(f"[Agents Warning] GADK initialization failed: {e}")
+        print(f"[Agents Warning] GenAI initialization failed: {e}")
         orchestrator_agent = None
 
-    # recovery logic
-    recovered = db_load_orders()
-    MOCK_ORDERS.extend(recovered)
+    # Full state recovery from Firestore
+    MOCK_ORDERS.clear()
+    recovered_orders = db_load_orders()
+    MOCK_ORDERS.extend(recovered_orders)
+
+    # Recover Chefs
+    MOCK_CHEFS.clear()
+    chefs_ref = db.collection("chefs").stream()
+    MOCK_CHEFS.extend([c.to_dict() for c in chefs_ref])
+
+    # Recover Active Tasks
+    MOCK_TASKS.clear()
+    tasks_ref = db.collection("tasks").where("status", "in", ["PENDING", "COOKING", "STAGED"]).stream()
+    MOCK_TASKS.extend([t.to_dict() for t in tasks_ref])
 
     now = time.time()
-    for order in recovered:
+    for order in recovered_orders:
         status = order["status"]
         cook_time = order["cook_time_secs"]
 
@@ -134,12 +170,12 @@ async def lifespan(app: FastAPI):
         elif status == "ready_for_pickup":
             print(f"[Recovery] {order['order_id']} already READY — no timer needed")
 
-    if recovered:
-        print(f"[DB] Recovered {len(recovered)} order(s) from Firestore")
+    if recovered_orders:
+        print(f"[DB] Recovered {len(recovered_orders)} order(s), {len(MOCK_CHEFS)} chef(s), and {len(MOCK_TASKS)} task(s) from Firestore")
     else:
-        print("[DB] No previous orders found in Firestore — fresh start")
-
-    yield  # Application runs here
+        print("[DB] No previous state found in Firestore — fresh start")
+    
+    yield
 
     print("[DB] Shutting down — state is managed in Firestore")
 
@@ -227,6 +263,15 @@ class AssignmentResult(BaseModel):
     status: str
     message: str
 
+class SystemStatus(BaseModel):
+    active: bool
+    message: str
+
+class CommitResult(BaseModel):
+    order_id: str
+    count: int
+    success: bool
+
 # ---------------------------------------------------------------------------
 # Menu catalog  (single source of truth for prep times)
 # ---------------------------------------------------------------------------
@@ -249,7 +294,16 @@ MOCK_ORDERS: list[dict] = []
 MOCK_CHEFS: list[dict] = []
 MOCK_TASKS: list[dict] = []
 
-db = firestore.Client()
+cred_path = os.environ.get("FIREBASE_CREDENTIALS_PATH", "./firebase-adminsdk.json")
+if os.path.exists(cred_path):
+    # Use explicit service account JSON for local development
+    db = firestore.Client.from_service_account_json(cred_path)
+    print(f"[Auth] Using Service Account JSON: {cred_path}")
+else:
+    # Fallback to Application Default Credentials (ADC) or Project ID environment variable
+    db = firestore.Client(project=os.environ.get("PROJECT_ID"))
+    print("[Auth] Using Application Default Credentials / ENV project ID")
+
 
 # ---------------------------------------------------------------------------
 # Firestore Persistence Helpers
@@ -293,10 +347,11 @@ def _sync_system_config():
 # ---------------------------------------------------------------------------
 orchestrator_agent = None 
 
-def is_system_active() -> bool:
-    """Returns True if the kitchen is currently accepting orders. If False, the agent must inform the user the kitchen is in maintenance."""
+def is_system_active() -> SystemStatus:
+    """Returns True if the kitchen is currently accepting orders."""
     cfg = db.collection("config").document("kitchen").get().to_dict()
-    return not cfg.get("maintenance_mode", False)
+    active = not cfg.get("maintenance_mode", False)
+    return SystemStatus(active=active, message="Kitchen is open" if active else "Kitchen is in maintenance")
 
 def get_available_chefs_v2() -> list[ChefAvailability]:
     """Retrieves all available chefs and calculates their live workloads from Firestore."""
@@ -330,17 +385,40 @@ def assign_task_staged(order_id: str, item_name: str, prep_time_secs: int, chef_
     
     return AssignmentResult(task_id=task_id, status="staged", message=f"Task {task_id} staged for atomic commit.")
 
-def commit_staged_tasks(order_id: str) -> str:
-    """Moves all STAGED tasks for an order into the live tasks collection. Only call this after all order items are staged."""
+def commit_staged_tasks(order_id: str) -> CommitResult:
+    """Moves all STAGED tasks for an order into the live tasks collection."""
     staged_ref = db.collection("staged_tasks").where("order_id", "==", order_id).stream()
     count = 0
     for doc in staged_ref:
         task_data = doc.to_dict()
         task_data["status"] = "PENDING"
+        
+        # 1. Update Firestore
         db.collection("tasks").document(task_data["id"]).set(task_data)
         db.collection("staged_tasks").document(task_data["id"]).delete()
+        
+        # 2. Update Local Cache (for real-time dashboard)
+        MOCK_TASKS.append(task_data)
         count += 1
-    return f"Successfully committed {count} tasks to the live queue for Order {order_id}."
+    return CommitResult(order_id=order_id, count=count, success=True)
+
+def get_active_tasks() -> list[dict]:
+    """Retrieves all current tasks that are not yet FINISHED."""
+    return [t for t in MOCK_TASKS if t["status"] != "DONE"]
+
+def reassign_task(task_id: str, new_chef_id: str) -> str:
+    """Moves an existing task from one chef to another. Use this for re-balancing."""
+    # 1. Update Firestore
+    task_ref = db.collection("tasks").document(task_id)
+    task_ref.update({"assigned_chef_id": new_chef_id})
+    
+    # 2. Update Local Cache
+    for t in MOCK_TASKS:
+        if t["id"] == task_id:
+            t["assigned_chef_id"] = new_chef_id
+            break
+            
+    return f"Task {task_id} successfully moved to Chef {new_chef_id}."
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -414,18 +492,39 @@ async def create_order(order: OrderRequest):
     if orchestrator_agent:
         print(f"[Atomic Swarm] Handing off Order {order_id}...")
         try:
-            await orchestrator_agent.run_async(prompt)
+            # run_async returns an async generator for steps/streaming. 
+            # We iterate through it to ensure all tool calls (commit) are executed.
+            async for _ in orchestrator_agent.run_async(prompt):
+                pass
         except Exception as e:
             print(f"[Swarm Error] Distributed workflow failed: {e}. Order {order_id} remains uncommitted.")
             # Fallback (Manual cleanup of staged tasks could happen here)
     else:
-        # Fallback if Swarm not ready
+        # Fallback if Swarm not ready: Manual staged allocation
         fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
         for item in resolved_items:
-            assign_task_to_chef(order_id, item["name"], item["prep_time_secs"], fallback_chef, "Manual Routing")
+            # 1. Call the tool to update Firestore
+            res = assign_task_staged(order_id, item["name"], item["prep_time_secs"], fallback_chef, "Manual Fallback")
+            
+            # 2. Update local memory immediately (since Firestore query in commit() might be too fast)
+            # We reconstruct the task data as it would be in commit_staged_tasks
+            task_data = {
+                "id": res.task_id,
+                "order_id": order_id,
+                "item_name": item["name"],
+                "assigned_chef_id": fallback_chef,
+                "agent_instruction": "Manual Fallback",
+                "prep_time_secs": item["prep_time_secs"],
+                "status": "PENDING",
+                "created_at": time.time()
+            }
+            MOCK_TASKS.append(task_data)
+            
+        # 3. Finalize in Firestore
+        commit_staged_tasks(order_id)
 
     item_summary = ", ".join(f"{i['emoji']} {i['name']} ({i['prep_time_secs']}s)" for i in resolved_items)
-    print(f"[Ordering Agent] {order_id} — {item_summary} | Cook time: {cook_time_secs}s")
+    print(f"[Ordering Agent] {order_id} -- Cook time: {cook_time_secs}s")
 
     asyncio.create_task(trigger_kitchen_agent(order_data))
 
@@ -508,20 +607,47 @@ def get_kds_data():
     }
 
 @app.post("/api/chefs")
-def add_chef(payload: ChefInput):
+async def add_chef(payload: ChefInput):
     new_chef = {"id": f"c{int(time.time()*1000)}", "name": payload.name, "isAvailable": True}
+    
+    # 1. Update Firestore
+    db.collection("chefs").document(new_chef["id"]).set(new_chef)
+    
+    # 2. Update Local Cache
     MOCK_CHEFS.append(new_chef)
+
+    # 3. Trigger Intelligent Re-balancing
+    if orchestrator_agent:
+        prompt = (
+            f"Optimization Request: New chef '{new_chef['name']}' ({new_chef['id']}) is available. "
+            "Please call get_active_tasks to check current workloads. If any chef is overloaded, "
+            "use reassign_task to move PENDING items to the new chef. Aim for equal distribution."
+        )
+        # Fire and forget re-balancing in background
+        asyncio.create_task(_consume_agent_run(orchestrator_agent, prompt))
+
     return new_chef
+
+async def _consume_agent_run(agent, prompt):
+    """Helper to consume the agent's async generator in fire-and-forget tasks."""
+    try:
+        async for _ in agent.run_async(prompt):
+            pass
+    except Exception as e:
+        print(f"[Agent Background Task Error] {e}")
 
 @app.delete("/api/chefs/{chef_id}")
 async def remove_chef(chef_id: str):
-    # 1. Remove the chef
+    # 1. Update Firestore
+    db.collection("chefs").document(chef_id).delete()
+    
+    # 2. Update Local Cache
     for chef in MOCK_CHEFS:
         if chef["id"] == chef_id:
             MOCK_CHEFS.remove(chef)
             break
             
-    # 2. Extract tasks that belonged to this chef that are not done
+    # 3. Handle Task Reassignment
     orphaned_tasks = []
     global MOCK_TASKS
     filtered_tasks = []
@@ -535,25 +661,61 @@ async def remove_chef(chef_id: str):
     
     reassigned_count = len(orphaned_tasks)
     
-    if reassigned_count > 0 and kitchen_manager_agent:
-        # Prompt the GADK LLM Agent to act as the re-assignment router!
+    if reassigned_count > 0 and orchestrator_agent:
+        # Prompt the Native Swarm to act as the re-assignment router!
         prompt = f"Chef {chef_id} just logged out. The following items lost their chef and need IMMEDIATE reassignment to active chefs:\n"
         for tk in orphaned_tasks:
             prompt += f"- {tk['item_name']} (from order {tk['order_id']}, prep time {tk['prep_time_secs']}s)\n"
             
-        print("[Agent Orchestration] Dispatching Chef Walk-out Recovery to KitchenManagerAgent...")
+        print(f"[Agent Orchestration] Dispatching recovery for {reassigned_count} orphaned tasks...")
         try:
-            await kitchen_manager_agent.run_async(prompt)
+            async for _ in orchestrator_agent.run_async(prompt):
+                pass
         except Exception as e:
-            print(f"[Agent Error] Reassignment failed: {e}. Falling back to default assignment.")
+            print(f"[Agent Error] Swarm recovery failed: {e}. Falling back to manual routing.")
             fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+            distinct_orders = set()
             for tk in orphaned_tasks:
-                assign_task_to_chef(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "API Error Fallback")
+                # 1. Update Firestore Staging
+                assign_task_staged(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "System Recovery")
+                
+                # 2. Update Local Cache Parity
+                task_data = {
+                    "id": tk["id"], # Reuse or regen ID
+                    "order_id": tk["order_id"],
+                    "item_name": tk["item_name"],
+                    "assigned_chef_id": fallback_chef,
+                    "prep_time_secs": tk["prep_time_secs"],
+                    "status": "PENDING",
+                    "created_at": time.time()
+                }
+                MOCK_TASKS.append(task_data)
+                distinct_orders.add(tk["order_id"])
+                
+            # 3. Commit Firestore for all touched orders
+            for oid in distinct_orders:
+                commit_staged_tasks(oid)
     else:
-        # Fallback if Agent wasn't initialized
+        # Fallback if Agent wasn't initialized or no active agents
         fallback_chef = MOCK_CHEFS[0]["id"] if MOCK_CHEFS else "c1"
+        distinct_orders = set()
         for tk in orphaned_tasks:
-            assign_task_to_chef(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "Manual fallback")
+            assign_task_staged(tk["order_id"], tk["item_name"], tk["prep_time_secs"], fallback_chef, "Manual fallback")
+            
+            task_data = {
+                "id": tk["id"],
+                "order_id": tk["order_id"],
+                "item_name": tk["item_name"],
+                "assigned_chef_id": fallback_chef,
+                "prep_time_secs": tk["prep_time_secs"],
+                "status": "PENDING",
+                "created_at": time.time()
+            }
+            MOCK_TASKS.append(task_data)
+            distinct_orders.add(tk["order_id"])
+            
+        for oid in distinct_orders:
+            commit_staged_tasks(oid)
 
     return {"status": "success", "reassigned_tasks": reassigned_count}
 
@@ -599,10 +761,10 @@ async def kds_stream(request: Request):
     async def event_generator():
         # Queue for cross-thread Firestore watcher communication
         queue = asyncio.Queue()
-
+        loop = asyncio.get_running_loop()
         def on_snapshot(col_snapshot, changes, read_time):
-            # Put a "dirty" signal into the queue
-            asyncio.run_coroutine_threadsafe(queue.put(True), asyncio.get_event_loop())
+            # Safe thread-to-loop communication: signal the main loop to fetch updates
+            loop.call_soon_threadsafe(queue.put_nowait, True)
 
         # Watch the collections that impact KDS
         watch_chefs = db.collection("chefs").on_snapshot(on_snapshot)

@@ -50,6 +50,8 @@ export default function KitchenDisplayPage() {
         localStorage.setItem('kds_token', data.access_token);
         setToken(data.access_token);
         setLoginError('');
+        // Immediately trigger data fetch after successful login
+        fetchData(); 
       } else {
         setLoginError('Invalid identity');
       }
@@ -61,6 +63,9 @@ export default function KitchenDisplayPage() {
   const handleLogout = () => {
     localStorage.removeItem('kds_token');
     setToken(null);
+    // Clear local state UI but backend continues processing
+    setChefs([]);
+    setTasks([]);
   };
 
   // Periodically fetch live roster and task assignments from backend
@@ -80,6 +85,8 @@ export default function KitchenDisplayPage() {
   useEffect(() => {
     if (!token) return;
 
+    fetchData(); // Initial load to prevent blank screen while SSE connects
+    
     // Use EventSource for real-time, event-driven updates (Firestore snapshots via SSE)
     const streamUrl = `/api/kds/stream`;
     const eventSource = new EventSource(streamUrl);
